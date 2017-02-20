@@ -1,0 +1,6 @@
+port: 5555
+redis_host: localhost
+redis_port: 6379
+redis_name: cache_files
+cache_dir: cache
+schema: methods.yaml
