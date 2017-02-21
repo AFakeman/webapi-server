@@ -4,3 +4,5 @@ redis_port: 6379
 redis_name: cache_files
 cache_dir: cache
 schema: methods.yaml
+log_file: server.log
+verbose: 1

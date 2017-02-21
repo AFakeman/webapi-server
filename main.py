@@ -1,7 +1,5 @@
 from server import Server
 
-server = Server()
-
-server.config_from_file("config.yaml")
+server = Server(config="config.yaml")
 
 server.run()

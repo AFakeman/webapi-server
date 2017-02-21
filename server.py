@@ -1,19 +1,20 @@
-import yaml
-import json
-import socket
-import os
 import io
-import urllib.request
-import urllib.parse
-import string
+import json
+import logging
+import os
 import random
+import socket
+import string
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
 from collections import defaultdict
 from functools import partial
-import time
-import sys
-import traceback
+import yaml
 from redis_map import RedisMap
-import threading
+
 
 default_config = {
     "cache_dir": "cache",
@@ -26,8 +27,11 @@ default_config = {
     "chunk_len": 1024*256,
     "random_name_len": 32,
     "max_request_len": 1024,
-    "backlog": 1
+    "backlog": 1,
+    "log_file": "server.log",
+    "verbose": 0
 }
+
 
 def _get_or_default(fr, key, default):
     if key in fr:
@@ -35,15 +39,23 @@ def _get_or_default(fr, key, default):
     else:
         return default[key]
 
+
 def _random_string(alphabet, length):
     result = ""
     for i in range(length):
         result += random.choice(alphabet)
     return result
 
+
 class Server:
-    def __init__(self):
-        self.methods = []
+    def __init__(self, config=None):
+        self.threads = []
+        if isinstance(config, str):
+            self.config_from_file(config)
+        elif isinstance(config, dict):
+            self.config_from_dict(config)
+        else:
+            self.config_from_dict(default_config)
 
     def _init_schema(self, schema=None):
         if not schema:
@@ -60,13 +72,13 @@ class Server:
             method["args"]["headers"] = defaultdict(list)
 
             for key, value in method["data"].items():
-                if not value is str:
+                if not isinstance(value, str):
                     method["data"][key] = value = str(value)
                 if value.startswith("$"):
                     method["args"]["data"][value[1:]].append(key)
 
             for key, value in method["headers"].items():
-                if not value is str:
+                if not isinstance(value, str):
                     method["headers"][key] = value = str(value)
                 if value.startswith("$"):
                     method["args"]["headers"][value[1:]].append(key)
@@ -81,25 +93,35 @@ class Server:
 
     def schema_from_file(self, filename):
         if not os.path.exists(filename):
-            print("No schema file found, using empty schema")
-            self.init_schema()
-        with open(filename, 'r') as f:
-            self.init_schema(yaml.load(f))
+            logging.warning("No schema file found, using empty schema")
+            self._init_schema()
+        else:
+            with open(filename, 'r') as f:
+                self._init_schema(yaml.load(f))
 
     def config_from_dict(self, config):
         self.root_dir = os.getcwd()
-        self.redis_host = get_or_default(config, "redis_host", default_config)
-        self.redis_port = get_or_default(config, "redis_port", default_config)
-        self.redis_name = get_or_default(config, "redis_name", default_config)
-        self.cache_dir = os.path.abspath(get_or_default(config, "cache_dir", default_config))
-        self.schema_from_file(get_or_default(config, "schema", default_config))
-        self.port = get_or_default(config, "port", default_config)
-        self.host = get_or_default(config, "host", default_config)
-        self.chunk_length = get_or_default(config, "chunk_len", default_config)
-        self.name_length = get_or_default(config, "random_name_len", default_config)
-        self.backlog = get_or_default(config, "backlog", default_config)
-        self.max_length = get_or_default(config, "max_request_len", default_config)
-        self.threads = []
+        self.redis_host = _get_or_default(config, "redis_host", default_config)
+        self.redis_port = _get_or_default(config, "redis_port", default_config)
+        self.redis_name = _get_or_default(config, "redis_name", default_config)
+        self.cache_dir = os.path.abspath(_get_or_default(config, "cache_dir", default_config))
+        self.schema_from_file(_get_or_default(config, "schema", default_config))
+        self.port = _get_or_default(config, "port", default_config)
+        self.host = _get_or_default(config, "host", default_config)
+        self.chunk_length = _get_or_default(config, "chunk_len", default_config)
+        self.name_length = _get_or_default(config, "random_name_len", default_config)
+        self.backlog = _get_or_default(config, "backlog", default_config)
+        self.max_length = _get_or_default(config, "max_request_len", default_config)
+        self.log_file = _get_or_default(config, "log_file", default_config)
+        self.verbose = _get_or_default(config, "verbose", default_config)
+        logging.basicConfig(filename=self.log_file, level=logging.DEBUG)
+        logging.for
+        if self.verbose:
+            stdout_handler = logging.StreamHandler(sys.stdout)
+            stdout_handler.setLevel(logging.DEBUG)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            stdout_handler.setFormatter(formatter)
+            logging.getLogger().addHandler(stdout_handler)
 
     def _process_request(self, request):
         method = self.methods[request["name"]]
@@ -116,10 +138,10 @@ class Server:
                     data[loc] = request["args"][arg]
         if "cache" in method and method["cache"] == 1:
             if "update" in request and request["update"] == 1:
-                self.update_cache(self, url, data, headers, method["method"])
-            return self.retrieve_local(url, data, headers, method["method"])
+                self._update_cache(url, data, headers, method["method"])
+            return self._retrieve_local(url, data, headers, method["method"])
         else:
-            return self.retrieve_remote(url, data, headers, method["method"])
+            return self._retrieve_remote(url, data, headers, method["method"])
 
     def _random_name(self, dir, length=None):
         if not length:
@@ -127,7 +149,7 @@ class Server:
         os.chdir(dir)
         name = ""
         while (not name) or os.path.exists(name):
-            name = random_string(string.ascii_lowercase, length)
+            name = _random_string(string.ascii_lowercase, length)
         with open(name, 'a'):
             pass
         os.chdir(self.root_dir)
@@ -149,30 +171,28 @@ class Server:
         return "{0} {1} {2} {3}".format(str(url), str(data_str), str(header_str), str(method))
 
     def _update_cache(self, url, data, headers, method):
-        print("Fetching new local version...")
-        with self.retrieve_remote(url, data, headers, method) as result:
-            name = self.random_name(self.cache_dir)
+        logging.info("Fetching new local version...")
+        with self._retrieve_remote(url, data, headers, method) as result:
+            name = self._random_name(self.cache_dir)
             os.chdir(self.cache_dir)
             with open(name, 'wb') as f:
                 for chunk in iter(partial(result.read, self.chunk_length), b''):
                     f.write(chunk)
-            cache_id = self.request_to_id(url, data, headers, method)
+            cache_id = self._request_to_id(url, data, headers, method)
             self.cache[cache_id] = name
         os.chdir(self.root_dir)
 
     def _retrieve_local(self, url, data, headers, method):
-        cache_id = self.request_to_id(url, data, headers, method)
-        print(cache_id.__hash__())
-        print(self.cache)
+        cache_id = self._request_to_id(url, data, headers, method)
         if cache_id not in self.cache:
-            self.update_cache(url, data, headers, method)
+            self._update_cache(url, data, headers, method)
         else:
-            print("Sending local version...")
+            logging.info("Sending local version...")
         os.chdir(self.cache_dir)
         return open(self.cache[cache_id], 'rb')
 
     def _retrieve_remote(self, url, data, headers, method):
-        if (method == "GET"):
+        if method == "GET":
             url += '?' + urllib.parse.urlencode(data)
             data = None
         req = urllib.request.Request(url=url, data=data, headers=headers)
@@ -183,22 +203,19 @@ class Server:
             data = conn.recv(self.max_length)
             req = json.loads(data.decode("UTF-8"), "UTF-8")
             try:
-                file = self.process_request(req)
+                file = self._process_request(req)
                 status = 0
             except BaseException as msg:
-                exc_type, exc_value, exc_traceback = sys.exc_info()
                 file = io.BytesIO()
                 status = 127
-                print(exc_type)
-                print(exc_value)
-                traceback.print_tb(exc_traceback)
+                logging.exception("Exception processing the request")
 
-            print("Started sending reply...")
+            logging.debug("Started sending reply...")
             now = time.time()
             conn.sendall(chr(status).encode('ascii'))
             for chunk in iter(partial(file.read, self.chunk_length), b''):
                 conn.sendall(chunk)
-            print("Sent everything in {0} seconds".format(str(time.time() - now)))
+            logging.info("Sent everything in {0} seconds".format(str(time.time() - now)))
             conn.close()
             file.close()
             return
@@ -208,15 +225,15 @@ class Server:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind((self.host, self.port))
                 s.listen(self.backlog)
-                print("Listening on the port {0}".format(int(self.port)))
+                logging.info("Listening on the port {0}".format(int(self.port)))
                 while True:
                     conn, addr = s.accept()
-                    print("New connection...")
-                    thread = threading.Thread(target=self.process_connect, args=(conn, addr))
+                    logging.info("New connection...")
+                    thread = threading.Thread(target=self._process_connect, args=(conn, addr))
                     self.threads.append(thread)
                     thread.start()
 
         except KeyboardInterrupt:
             s.close()
-            print("Shutting down...")
-            self.save()
+            logging.info("Shutting down...")
+            self._save()
