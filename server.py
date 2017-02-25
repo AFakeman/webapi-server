@@ -115,7 +115,6 @@ class Server:
         self.log_file = _get_or_default(config, "log_file", default_config)
         self.verbose = _get_or_default(config, "verbose", default_config)
         logging.basicConfig(filename=self.log_file, level=logging.DEBUG)
-        logging.for
         if self.verbose:
             stdout_handler = logging.StreamHandler(sys.stdout)
             stdout_handler.setLevel(logging.DEBUG)
