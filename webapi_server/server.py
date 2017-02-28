@@ -15,58 +15,76 @@ from functools import partial
 import yaml
 from redis_map import RedisMap
 
-
-default_config = {
-    "cache_dir": "cache",
-    "redis_host": "localhost",
-    "redis_port": 6379,
-    "redis_name": "cache",
-    "schema": "schema.yaml",
-    "port": 8080,
-    "host": '',
-    "chunk_len": 1024*256,
-    "random_name_len": 32,
-    "max_request_len": 1024,
-    "backlog": 1,
-    "log_file": "server.log",
-    "verbose": 0
-}
-
-
-def _get_or_default(fr, key, default):
-    if key in fr:
-        return fr[key]
-    else:
-        return default[key]
-
-
-def _random_string(alphabet, length):
+def random_string(alphabet, length):
     result = ""
     for i in range(length):
         result += random.choice(alphabet)
     return result
 
-
 class Server:
+    _default_config = {
+        "cache_dir": "cache",
+        "redis_host": "localhost",
+        "redis_port": 6379,
+        "redis_name": "cache",
+        "schema": "schema.yaml",
+        "port": 8080,
+        "host": '',
+        "chunk_len": 1024 * 256,
+        "random_name_len": 32,
+        "max_request_len": 1024,
+        "backlog": 1,
+        "log_file": "server.log",
+        "verbose": 0
+    }
+
     def __init__(self, config=None):
         self.threads = []
+        self.config = None
+        self.root_dir = None
+        self.redis_host = None
+        self.redis_port = None
+        self.redis_name = None
+        self.cache_dir = None
+        self.port = None
+        self.host = None
+        self.chunk_length = None
+        self.name_length = None
+        self.backlog = None
+        self.max_length = None
+        self.log_file = None
+        self.verbose = None
+        self.schema_file = None
+        self.logger = __name__
+        self.cache = {}
+        self.methods = {}
         if isinstance(config, str):
-            self.config_from_file(config)
+            self._load_config_from_file(config)
         elif isinstance(config, dict):
-            self.config_from_dict(config)
+            self._load_config_from_dict(config)
         else:
-            self.config_from_dict(default_config)
+            self._load_config_from_dict({})
+
+    def _init_logger(self):
+        logger = logging.getLogger(self.logger)
+        logger.handlers = []
+        if self.log_file:
+            file_handler = logging.FileHandler(self.log_file)
+            file_handler.setLevel(logging.DEBUG)
+            logger.addHandler(file_handler)
+        if self.verbose:
+            stdout_handler = logging.StreamHandler(sys.stdout)
+            stdout_handler.setLevel(logging.DEBUG)
+            logger.addHandler(stdout_handler)
 
     def _init_schema(self, schema=None):
         if not schema:
-            self.cache = {}
-            self.methods = {}
-            return
+            schema = {}
 
         self.methods = schema
         self.cache = RedisMap(host=self.redis_host, port=self.redis_port, name=self.redis_name)
 
-        for meth_name, method in self.methods.items():
+        for method_name, method in self.methods.items():
             method["args"] = {}
             method["args"]["data"] = defaultdict(list)
             method["args"]["headers"] = defaultdict(list)
@@ -86,11 +104,6 @@ class Server:
     def _save(self):
         pass
 
-    def config_from_file(self, config_fn):
-        with open(config_fn, 'r') as f:
-            config = yaml.load(f)
-        self.config_from_dict(config)
-
     def schema_from_file(self, filename):
         if not os.path.exists(filename):
             logging.warning("No schema file found, using empty schema")
@@ -99,62 +112,77 @@ class Server:
             with open(filename, 'r') as f:
                 self._init_schema(yaml.load(f))
 
-    def config_from_dict(self, config):
+    def _load_config_from_file(self, config_fn):
+        with open(config_fn, 'r') as f:
+            config = yaml.load(f)
+        self._load_config_from_dict(config)
+
+    def _load_config_from_dict(self, config):
+        self.config = dict(self._default_config, **config)
         self.root_dir = os.getcwd()
-        self.redis_host = _get_or_default(config, "redis_host", default_config)
-        self.redis_port = _get_or_default(config, "redis_port", default_config)
-        self.redis_name = _get_or_default(config, "redis_name", default_config)
-        self.cache_dir = os.path.abspath(_get_or_default(config, "cache_dir", default_config))
-        self.schema_from_file(_get_or_default(config, "schema", default_config))
-        self.port = _get_or_default(config, "port", default_config)
-        self.host = _get_or_default(config, "host", default_config)
-        self.chunk_length = _get_or_default(config, "chunk_len", default_config)
-        self.name_length = _get_or_default(config, "random_name_len", default_config)
-        self.backlog = _get_or_default(config, "backlog", default_config)
-        self.max_length = _get_or_default(config, "max_request_len", default_config)
-        self.log_file = _get_or_default(config, "log_file", default_config)
-        self.verbose = _get_or_default(config, "verbose", default_config)
-        logging.basicConfig(filename=self.log_file, level=logging.DEBUG)
-        if self.verbose:
-            stdout_handler = logging.StreamHandler(sys.stdout)
-            stdout_handler.setLevel(logging.DEBUG)
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            stdout_handler.setFormatter(formatter)
-            logging.getLogger().addHandler(stdout_handler)
+        self.redis_host = self.config["redis_host"]
+        self.redis_port = self.config["redis_port"]
+        self.redis_name = self.config["redis_name"]
+        self.cache_dir = os.path.abspath(self.config["cache_dir"])
+        self.port = self.config["port"]
+        self.host = self.config["host"]
+        self.chunk_length = self.config["chunk_len"]
+        self.name_length = self.config["random_name_len"]
+        self.backlog = self.config["backlog"]
+        self.max_length = self.config["max_request_len"]
+        self.log_file = self.config["log_file"]
+        self.verbose = self.config["verbose"]
+
+    def _apply_config(self):
+        self._init_logger()
+        self.schema_from_file(self.config["schema"])
+
+    def reload_config(self, config):
+        if isinstance(config, str):
+            self._load_config_from_file(config)
+        elif isinstance(config, dict):
+            self._load_config_from_dict(config)
+        else:
+            raise TypeError("Unknown config type")
+        self._apply_config()
 
     def _process_request(self, request):
         method = self.methods[request["name"]]
         url = method["url"]
         headers = method["headers"].copy()
         data = method["data"].copy()
-        if "headers" in method["args"]:
-            for arg in method["args"]["headers"]:
-                for loc in method["args"]["headers"][arg]:
-                    headers[loc] = request["args"][arg]
-        if "data" in method["args"]:
-            for arg in method["args"]["data"]:
-                for loc in method["args"]["data"][arg]:
-                    data[loc] = request["args"][arg]
-        if "cache" in method and method["cache"] == 1:
-            if "update" in request and request["update"] == 1:
+        if "headers" in method["args"] and method["args"]["headers"]:
+            headers = self._insert_arguments(args=request["args"], data=headers, map=method["args"]["headers"])
+        if "data" in method["args"] and method["args"]["headers"]:
+            data = self._insert_arguments(args=request["args"], data=data, map=method["args"]["data"])
+        if "cache" in method and method["cache"]:
+            if "update" in request and request["update"]:
                 self._update_cache(url, data, headers, method["method"])
             return self._retrieve_local(url, data, headers, method["method"])
         else:
             return self._retrieve_remote(url, data, headers, method["method"])
 
-    def _random_name(self, dir, length=None):
+    def _insert_arguments(self, args, data, map):
+        data = data.copy()
+        for arg in map:
+            for loc in map[arg]:
+                data[loc] = args[arg]
+        return data
+
+    def _random_name(self, directory, length=None):
         if not length:
             length = self.name_length
-        os.chdir(dir)
+        os.chdir(directory)
         name = ""
         while (not name) or os.path.exists(name):
-            name = _random_string(string.ascii_lowercase, length)
+            name = random_string(string.ascii_lowercase, length)
         with open(name, 'a'):
             pass
         os.chdir(self.root_dir)
         return name
 
-    def _request_to_id(self, url, data, headers, method):
+    @staticmethod
+    def _request_to_id(url, data, headers, method):
         if data:
             data_arr = sorted(list(data.items()))
             data_str = urllib.parse.urlencode(data_arr)
@@ -190,10 +218,13 @@ class Server:
         os.chdir(self.cache_dir)
         return open(self.cache[cache_id], 'rb')
 
-    def _retrieve_remote(self, url, data, headers, method):
+    @staticmethod
+    def _retrieve_remote(url, data, headers, method):
         if method == "GET":
             url += '?' + urllib.parse.urlencode(data)
             data = None
+        else:
+            data = urllib.parse.urlencode(data)
         req = urllib.request.Request(url=url, data=data, headers=headers)
         return urllib.request.urlopen(req)
 
@@ -201,10 +232,11 @@ class Server:
         with conn:
             data = conn.recv(self.max_length)
             req = json.loads(data.decode("UTF-8"), "UTF-8")
+            # noinspection PyBroadException
             try:
                 file = self._process_request(req)
                 status = 0
-            except BaseException as msg:
+            except:
                 file = io.BytesIO()
                 status = 127
                 logging.exception("Exception processing the request")
@@ -233,6 +265,5 @@ class Server:
                     thread.start()
 
         except KeyboardInterrupt:
-            s.close()
             logging.info("Shutting down...")
             self._save()
